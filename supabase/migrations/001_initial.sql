@@ -1,0 +1,38 @@
+-- Run once in Supabase SQL Editor. No destructive reset statements.
+create extension if not exists pgcrypto;
+create table if not exists public.authorized_users(user_id uuid primary key references auth.users(id) on delete cascade, created_at timestamptz not null default now());
+revoke all on public.authorized_users from anon,authenticated;
+create or replace function public.is_authorized() returns boolean language sql stable security definer set search_path = '' as $$ select exists(select 1 from public.authorized_users where user_id=auth.uid()); $$;
+revoke all on function public.is_authorized() from public;
+grant execute on function public.is_authorized() to authenticated;
+create table if not exists public.students(id uuid primary key default gen_random_uuid(),full_name text not null check(length(trim(full_name)) between 1 and 120),phone text not null unique check(phone ~ '^[0-9]{10}$'),email text,notes text,created_at timestamptz not null default now(),updated_at timestamptz not null default now());
+create table if not exists public.subjects(id uuid primary key default gen_random_uuid(),name text not null unique check(length(trim(name)) between 1 and 100),description text,created_at timestamptz not null default now(),updated_at timestamptz not null default now());
+create table if not exists public.notes_catalog(id uuid primary key default gen_random_uuid(),subject_id uuid references public.subjects(id) on delete restrict,chapter_name text not null check(length(trim(chapter_name)) between 1 and 180),price numeric(12,2) not null default 0 check(price>=0),description text,file_path text unique,file_size bigint check(file_size>=0),status text not null default 'active' check(status in ('active','archived')),created_at timestamptz not null default now(),updated_at timestamptz not null default now());
+create table if not exists public.purchases(id uuid primary key default gen_random_uuid(),student_id uuid not null references public.students(id) on delete restrict,subject_id uuid references public.subjects(id) on delete restrict,note_id uuid references public.notes_catalog(id) on delete restrict,chapter_title text not null check(length(trim(chapter_title))>0),amount numeric(12,2) not null check(amount>=0),payment_method text not null check(payment_method in ('UPI','cash','other')),remark text,purchased_at timestamptz not null default now(),created_at timestamptz not null default now(),updated_at timestamptz not null default now());
+create index if not exists idx_students_name on public.students(full_name);
+create index if not exists idx_notes_subject on public.notes_catalog(subject_id);
+create index if not exists idx_notes_created on public.notes_catalog(created_at desc);
+create index if not exists idx_purchases_student_date on public.purchases(student_id,purchased_at desc);
+create index if not exists idx_purchases_note on public.purchases(note_id);
+create index if not exists idx_purchases_subject_date on public.purchases(subject_id,purchased_at desc);
+create index if not exists idx_purchases_date on public.purchases(purchased_at desc);
+create or replace function public.touch_updated_at() returns trigger language plpgsql set search_path = '' as $$ begin new.updated_at=now();return new;end $$;
+drop trigger if exists students_updated on public.students;create trigger students_updated before update on public.students for each row execute function public.touch_updated_at();
+drop trigger if exists subjects_updated on public.subjects;create trigger subjects_updated before update on public.subjects for each row execute function public.touch_updated_at();
+drop trigger if exists notes_updated on public.notes_catalog;create trigger notes_updated before update on public.notes_catalog for each row execute function public.touch_updated_at();
+drop trigger if exists purchases_updated on public.purchases;create trigger purchases_updated before update on public.purchases for each row execute function public.touch_updated_at();
+alter table public.authorized_users enable row level security;
+alter table public.students enable row level security;
+alter table public.subjects enable row level security;
+alter table public.notes_catalog enable row level security;
+alter table public.purchases enable row level security;
+drop policy if exists owner_students on public.students;create policy owner_students on public.students for all to authenticated using ((select public.is_authorized())) with check ((select public.is_authorized()));
+drop policy if exists owner_subjects on public.subjects;create policy owner_subjects on public.subjects for all to authenticated using ((select public.is_authorized())) with check ((select public.is_authorized()));
+drop policy if exists owner_notes on public.notes_catalog;create policy owner_notes on public.notes_catalog for all to authenticated using ((select public.is_authorized())) with check ((select public.is_authorized()));
+drop policy if exists owner_purchases on public.purchases;create policy owner_purchases on public.purchases for all to authenticated using ((select public.is_authorized())) with check ((select public.is_authorized()));
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types) values ('private-notes','private-notes',false,26214400,array['application/pdf']) on conflict(id) do update set public=false,file_size_limit=26214400,allowed_mime_types=array['application/pdf'];
+drop policy if exists notes_storage_select on storage.objects;create policy notes_storage_select on storage.objects for select to authenticated using(bucket_id='private-notes' and (select public.is_authorized()));
+drop policy if exists notes_storage_insert on storage.objects;create policy notes_storage_insert on storage.objects for insert to authenticated with check(bucket_id='private-notes' and (select public.is_authorized()) and name ~ '^[0-9a-f-]{36}\.pdf$');
+drop policy if exists notes_storage_delete on storage.objects;create policy notes_storage_delete on storage.objects for delete to authenticated using(bucket_id='private-notes' and (select public.is_authorized()));
+-- IMPORTANT: In Supabase Auth > Users, create the account manually, then authorize its UUID:
+-- insert into public.authorized_users(user_id) values ('REPLACE_WITH_AUTH_USER_UUID');
